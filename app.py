@@ -74,7 +74,12 @@ with tab_reshape:
                                  _clamp(guess.data_start + 1, 1, n_rows))
 
     letters = [get_column_letter(c + 1) for c in range(width)]
-    default_ids = [get_column_letter(c + 1) for c in guess.id_columns]
+    # keep only detected id columns that are within the actual column range
+    default_ids = [get_column_letter(c + 1) for c in guess.id_columns
+                   if 0 <= c < width]
+    default_ids = [l for l in default_ids if l in letters]
+    if not default_ids and letters:
+        default_ids = [letters[0]]
     id_letters = st.multiselect("Identifier columns (kept as-is; everything else is unpivoted)",
                                 letters, default=default_ids)
 
