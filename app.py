@@ -45,10 +45,21 @@ tab_reshape, tab_trace = st.tabs(["Reshape to granular table", "Trace formulas"]
 # Tab 1 — reshape
 # --------------------------------------------------------------------------- #
 with tab_reshape:
-    sheet_name = st.selectbox("Sheet", book.sheet_names, key="reshape_sheet")
+    # default to the first sheet that actually has data (skip empty Dashboards etc.)
+    def _sheet_has_data(nm: str) -> bool:
+        g = book.sheets[nm].values
+        return any(E._nonempty_count(r) > 0 for r in g)
+
+    nonempty_sheets = [nm for nm in book.sheet_names if _sheet_has_data(nm)]
+    default_idx = book.sheet_names.index(nonempty_sheets[0]) if nonempty_sheets else 0
+    sheet_name = st.selectbox("Sheet", book.sheet_names, index=default_idx, key="reshape_sheet")
     sheet = book.sheets[sheet_name]
     grid = E.apply_merges(sheet)
     width = max((len(r) for r in grid), default=0)
+
+    if width == 0 or not any(E._nonempty_count(r) > 0 for r in grid):
+        st.warning(f"Sheet **{sheet_name}** is empty. Pick a sheet that contains data.")
+        st.stop()
 
     with st.expander("Raw sheet preview (first 15 rows)", expanded=True):
         prev = pd.DataFrame(
