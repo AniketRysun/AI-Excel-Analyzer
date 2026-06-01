@@ -17,6 +17,7 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 
 import engine_core as E
 import formula_trace as T
+import hhw_parser as H
 
 st.set_page_config(page_title="Excel → Power BI Granularizer", layout="wide")
 
@@ -39,7 +40,25 @@ except Exception as exc:  # noqa: BLE001
     st.error(f"Could not read the file: {exc}")
     st.stop()
 
-tab_reshape, tab_trace = st.tabs(["Reshape to granular table", "Trace formulas"])
+tab_scan, tab_reshape, tab_trace = st.tabs(
+    ["Scan workbook", "Reshape to granular table", "Trace formulas"])
+
+# --------------------------------------------------------------------------- #
+# Tab 0 — scan every sheet and give a verdict
+# --------------------------------------------------------------------------- #
+with tab_scan:
+    st.write("A verdict for every sheet — which ones can become granular tables, "
+             "which are already flat, and which to skip.")
+    report = E.analyze_workbook(book)
+    for row in report:
+        if row["verdict"] != "empty" and H.looks_like_hhw(book.sheets[row["sheet"]]):
+            row["verdict"] = "reshapeable (H&HW)"
+            row["suggest"] = "Use the Reshape tab — the H&HW parser handles this automatically."
+    rep_df = pd.DataFrame(report)[["sheet", "verdict", "rows", "cols", "why", "suggest"]]
+    rep_df.columns = ["Sheet", "Verdict", "Data rows", "Cols", "Why", "Suggested action"]
+    st.dataframe(rep_df, use_container_width=True, height=560)
+    st.caption("Verdicts are heuristic guesses to point you at the right sheets — "
+               "confirm in the Reshape tab before trusting any output.")
 
 # --------------------------------------------------------------------------- #
 # Tab 1 — reshape
@@ -68,86 +87,113 @@ with tab_reshape:
         )
         st.dataframe(prev, use_container_width=True)
 
-    guess = E.detect_layout(grid)
-    st.markdown("**Detected layout** (adjust anything that looks wrong):")
+    # ---- dedicated path for H&HW cross-tabs (handles the irregular layout) ----
+    _handled = False
+    if H.looks_like_hhw(sheet):
+        _handled = True
+        st.success("Detected an H&HW (Headcount & Hours Worked) cross-tab — "
+                   "using the dedicated parser.")
+        include_ytd = st.checkbox("Include 'Year to Date Average' as a row "
+                                  "(off = months only, recommended)", value=False)
+        try:
+            hres = H.parse(sheet, include_ytd=include_ytd)
+            hdf = hres["tidy"]
+            st.subheader(f"Granular table — {len(hdf)} rows")
+            st.dataframe(hdf, use_container_width=True, height=420)
+            with st.expander("Transformation log"):
+                for line in hres["log"]:
+                    st.write("•", line)
+            d1, d2 = st.columns(2)
+            d1.download_button("Download CSV", E.to_csv_bytes(hdf),
+                               file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+            d2.download_button("Download XLSX (data + log)",
+                               E.to_xlsx_bytes(hdf, hres["log"]),
+                               file_name=f"{sheet_name}_granular.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"H&HW parse failed: {exc}")
 
-    n_rows = max(1, len(grid))
+    if not _handled:
+        guess = E.detect_layout(grid)
+        st.markdown("**Detected layout** (adjust anything that looks wrong):")
 
-    def _clamp(v: int, lo: int, hi: int) -> int:
-        return max(lo, min(int(v), hi))
+        n_rows = max(1, len(grid))
 
-    c1, c2, c3 = st.columns(3)
-    header_start = c1.number_input("Header starts at row", 1, n_rows,
-                                   _clamp(guess.header_start + 1, 1, n_rows))
-    header_rows = c2.number_input("Number of header rows", 1, 10,
-                                  _clamp(guess.header_rows, 1, 10))
-    data_start = c3.number_input("Data starts at row", 1, n_rows,
-                                 _clamp(guess.data_start + 1, 1, n_rows))
+        def _clamp(v: int, lo: int, hi: int) -> int:
+            return max(lo, min(int(v), hi))
 
-    letters = [get_column_letter(c + 1) for c in range(width)]
-    # keep only detected id columns that are within the actual column range
-    default_ids = [get_column_letter(c + 1) for c in guess.id_columns
-                   if 0 <= c < width]
-    default_ids = [l for l in default_ids if l in letters]
-    if not default_ids and letters:
-        default_ids = [letters[0]]
-    id_letters = st.multiselect("Identifier columns (kept as-is; everything else is unpivoted)",
-                                letters, default=default_ids)
+        c1, c2, c3 = st.columns(3)
+        header_start = c1.number_input("Header starts at row", 1, n_rows,
+                                       _clamp(guess.header_start + 1, 1, n_rows))
+        header_rows = c2.number_input("Number of header rows", 1, 10,
+                                      _clamp(guess.header_rows, 1, 10))
+        data_start = c3.number_input("Data starts at row", 1, n_rows,
+                                     _clamp(guess.data_start + 1, 1, n_rows))
 
-    c4, c5 = st.columns(2)
-    use_hier = c4.checkbox("Treat single-cell rows as section banners (fill down)", value=True)
-    hier_name = c4.text_input("Section column name", "Section", disabled=not use_hier)
-    drop_totals = c5.checkbox("Drop total / subtotal rows", value=True)
+        letters = [get_column_letter(c + 1) for c in range(width)]
+        # keep only detected id columns that are within the actual column range
+        default_ids = [get_column_letter(c + 1) for c in guess.id_columns
+                       if 0 <= c < width]
+        default_ids = [l for l in default_ids if l in letters]
+        if not default_ids and letters:
+            default_ids = [letters[0]]
+        id_letters = st.multiselect("Identifier columns (kept as-is; everything else is unpivoted)",
+                                    letters, default=default_ids)
 
-    c6, c7 = st.columns(2)
-    sep = c6.text_input("Header level separator", " | ")
-    split_var = c7.checkbox("Split the unpivoted header into multiple columns", value=True)
-    split_names_raw = c7.text_input("Names for split columns (comma-separated)",
-                                    "Month, Metric", disabled=not split_var)
+        c4, c5 = st.columns(2)
+        use_hier = c4.checkbox("Treat single-cell rows as section banners (fill down)", value=True)
+        hier_name = c4.text_input("Section column name", "Section", disabled=not use_hier)
+        drop_totals = c5.checkbox("Drop total / subtotal rows", value=True)
 
-    cfg = E.ReshapeConfig(
-        header_start=int(header_start) - 1,
-        header_rows=int(header_rows),
-        data_start=int(data_start) - 1,
-        id_columns=[column_index_from_string(l) - 1 for l in id_letters] or [0],
-        header_sep=sep,
-        drop_totals=drop_totals,
-        use_row_hierarchy=use_hier,
-        hierarchy_name=hier_name or "Section",
-        split_variable=split_var,
-        split_names=[s.strip() for s in split_names_raw.split(",") if s.strip()],
-    )
+        c6, c7 = st.columns(2)
+        sep = c6.text_input("Header level separator", " | ")
+        split_var = c7.checkbox("Split the unpivoted header into multiple columns", value=True)
+        split_names_raw = c7.text_input("Names for split columns (comma-separated)",
+                                        "Month, Metric", disabled=not split_var)
 
-    try:
-        res = E.reshape(sheet, cfg)
-        rec = E.reconcile(res, sheet, cfg)
-    except Exception as exc:  # noqa: BLE001
-        st.error(f"Reshape failed with the current settings: {exc}")
-        st.stop()
+        cfg = E.ReshapeConfig(
+            header_start=int(header_start) - 1,
+            header_rows=int(header_rows),
+            data_start=int(data_start) - 1,
+            id_columns=[column_index_from_string(l) - 1 for l in id_letters] or [0],
+            header_sep=sep,
+            drop_totals=drop_totals,
+            use_row_hierarchy=use_hier,
+            hierarchy_name=hier_name or "Section",
+            split_variable=split_var,
+            split_names=[s.strip() for s in split_names_raw.split(",") if s.strip()],
+        )
 
-    st.subheader(f"Granular table — {len(res['tidy'])} rows")
-    st.dataframe(res["tidy"], use_container_width=True, height=380)
+        try:
+            res = E.reshape(sheet, cfg)
+            rec = E.reconcile(res, sheet, cfg)
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Reshape failed with the current settings: {exc}")
+            st.stop()
 
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Source total", f"{rec['source_total']:,.2f}")
-    m2.metric("Output total", f"{rec['output_total']:,.2f}")
-    m3.metric("Reconciles?", "✅ yes" if rec["ok"] else f"⚠️ off by {rec['difference']:,.2f}")
+        st.subheader(f"Granular table — {len(res['tidy'])} rows")
+        st.dataframe(res["tidy"], use_container_width=True, height=380)
 
-    with st.expander("Transformation log"):
-        for line in res["log"]:
-            st.write("•", line)
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Source total", f"{rec['source_total']:,.2f}")
+        m2.metric("Output total", f"{rec['output_total']:,.2f}")
+        m3.metric("Reconciles?", "✅ yes" if rec["ok"] else f"⚠️ off by {rec['difference']:,.2f}")
 
-    d1, d2 = st.columns(2)
-    d1.download_button("Download CSV", E.to_csv_bytes(res["tidy"]),
-                       file_name=f"{sheet_name}_granular.csv", mime="text/csv")
-    d2.download_button("Download XLSX (data + log)",
-                       E.to_xlsx_bytes(res["tidy"], res["log"]),
-                       file_name=f"{sheet_name}_granular.xlsx",
-                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        with st.expander("Transformation log"):
+            for line in res["log"]:
+                st.write("•", line)
 
-# --------------------------------------------------------------------------- #
-# Tab 2 — formula tracing
-# --------------------------------------------------------------------------- #
+        d1, d2 = st.columns(2)
+        d1.download_button("Download CSV", E.to_csv_bytes(res["tidy"]),
+                           file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+        d2.download_button("Download XLSX (data + log)",
+                           E.to_xlsx_bytes(res["tidy"], res["log"]),
+                           file_name=f"{sheet_name}_granular.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+    # --------------------------------------------------------------------------- #
+    # Tab 2 — formula tracing
+    # --------------------------------------------------------------------------- #
 with tab_trace:
     if sheet.formulas is None:
         st.warning("Formula tracing needs an .xlsx file (no formula data in .xls / .csv).")
