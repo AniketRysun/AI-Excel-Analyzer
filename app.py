@@ -60,12 +60,18 @@ with tab_reshape:
     guess = E.detect_layout(grid)
     st.markdown("**Detected layout** (adjust anything that looks wrong):")
 
+    n_rows = max(1, len(grid))
+
+    def _clamp(v: int, lo: int, hi: int) -> int:
+        return max(lo, min(int(v), hi))
+
     c1, c2, c3 = st.columns(3)
-    header_start = c1.number_input("Header starts at row", 1, max(1, len(grid)),
-                                   guess.header_start + 1)
-    header_rows = c2.number_input("Number of header rows", 1, 10, max(1, guess.header_rows))
-    data_start = c3.number_input("Data starts at row", 1, max(1, len(grid)),
-                                 guess.data_start + 1)
+    header_start = c1.number_input("Header starts at row", 1, n_rows,
+                                   _clamp(guess.header_start + 1, 1, n_rows))
+    header_rows = c2.number_input("Number of header rows", 1, 10,
+                                  _clamp(guess.header_rows, 1, 10))
+    data_start = c3.number_input("Data starts at row", 1, n_rows,
+                                 _clamp(guess.data_start + 1, 1, n_rows))
 
     letters = [get_column_letter(c + 1) for c in range(width)]
     default_ids = [get_column_letter(c + 1) for c in guess.id_columns]
