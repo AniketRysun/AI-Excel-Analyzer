@@ -236,6 +236,8 @@ class ReshapeConfig:
     hierarchy_name: str = "Section"
     split_variable: bool = False      # split the melted Variable by header_sep
     split_names: list[str] = field(default_factory=list)
+    pivot_metric: bool = False        # pivot the LAST split level back into columns
+    skip_repeated_headers: bool = True  # drop in-table rows that repeat the header labels
 
 
 def _flatten_headers(grid, cfg: ReshapeConfig) -> list[str]:
@@ -301,7 +303,14 @@ def reshape(sheet: Sheet, cfg: ReshapeConfig) -> dict:
     id_names = [names[c] for c in cfg.id_columns]
     val_cols = [c for c in range(width) if c not in cfg.id_columns]
 
-    rows, dropped_blank, dropped_total, set_aside_totals = [], 0, 0, []
+    # set of header label strings, to recognise repeated sub-header rows mid-table
+    header_label_set = {str(names[c]).strip().lower() for c in range(width)}
+    measure_labels = {str(grid[cfg.data_start - 1][c]).strip().lower()
+                      for c in val_cols
+                      if cfg.data_start - 1 < len(grid) and c < len(grid[cfg.data_start - 1])
+                      and not _is_blank(grid[cfg.data_start - 1][c])}
+
+    rows, dropped_blank, dropped_total, dropped_repeat, set_aside_totals = [], 0, 0, 0, []
     current_section = None
     for r in range(cfg.data_start, len(grid)):
         row = grid[r]
@@ -315,6 +324,18 @@ def reshape(sheet: Sheet, cfg: ReshapeConfig) -> dict:
             dropped_total += 1
             set_aside_totals.append([row[c] if c < len(row) else None for c in val_cols])
             continue
+
+        # repeated sub-header row: the measure cells echo the header labels
+        if cfg.skip_repeated_headers and measure_labels:
+            cell_strs = {str(row[c]).strip().lower() for c in val_cols
+                         if c < len(row) and not _is_blank(row[c])}
+            if cell_strs and cell_strs.issubset(header_label_set | measure_labels):
+                # also require that almost none of the measure cells are numeric
+                numeric_here = sum(1 for c in val_cols
+                                   if c < len(row) and to_number(row[c]) is not None)
+                if numeric_here == 0:
+                    dropped_repeat += 1
+                    continue
 
         # section banner: only the first id column filled, rest of row empty
         if cfg.use_row_hierarchy:
@@ -332,7 +353,8 @@ def reshape(sheet: Sheet, cfg: ReshapeConfig) -> dict:
         rows.append(rec)
 
     wide = pd.DataFrame(rows)
-    log.append(f"Dropped {dropped_blank} blank row(s) and {dropped_total} total/subtotal row(s).")
+    log.append(f"Dropped {dropped_blank} blank, {dropped_total} total/subtotal, "
+               f"and {dropped_repeat} repeated-header row(s).")
     if cfg.use_row_hierarchy:
         log.append(f"Filled row hierarchy down into column '{cfg.hierarchy_name}'.")
 
@@ -356,6 +378,18 @@ def reshape(sheet: Sheet, cfg: ReshapeConfig) -> dict:
             tidy[col_names[i]] = parts[i].str.strip()
         tidy = tidy.drop(columns=["Variable"])
         log.append(f"Split header into columns: {', '.join(col_names)}.")
+
+        # pivot the LAST split level (e.g. Metric) back out into its own columns
+        if cfg.pivot_metric and len(col_names) >= 2:
+            metric_col = col_names[-1]
+            index_cols = [c for c in tidy.columns if c not in (metric_col, "Value")]
+            tidy = (tidy
+                    .pivot_table(index=index_cols, columns=metric_col,
+                                 values="Value", aggfunc="first")
+                    .reset_index())
+            tidy.columns.name = None
+            log.append(f"Pivoted '{metric_col}' back into measure columns "
+                       f"-> {len(tidy)} rows, columns: {', '.join(map(str, tidy.columns))}.")
 
     return {
         "tidy": tidy,
@@ -411,3 +445,73 @@ def to_xlsx_bytes(df: pd.DataFrame, log_lines: list[str]) -> bytes:
         pd.DataFrame({"Transformation log": log_lines}).to_excel(
             xw, index=False, sheet_name="Transformation_Log")
     return buf.getvalue()
+
+
+# --------------------------------------------------------------------------- #
+# Workbook analyzer — classify every sheet
+# --------------------------------------------------------------------------- #
+def analyze_workbook(book: "Book") -> list[dict]:
+    """Classify each sheet so the user can see which are worth granularizing.
+
+    Verdicts:
+      * 'empty'            : no data.
+      * 'already_granular' : a single flat table, one header row, mostly one row
+                             per record already -> just export as-is.
+      * 'reshapeable'      : cross-tab / multi-row header / wide repeating blocks
+                             -> can be unpivoted into a granular table.
+      * 'review'           : has data but structure is unclear -> open and confirm.
+    """
+    out = []
+    for nm in book.sheet_names:
+        s = book.sheets[nm]
+        grid = apply_merges(s)
+        width = max((len(r) for r in grid), default=0)
+        nonblank = [r for r in grid if _nonempty_count(r) > 0]
+        rows = len(nonblank)
+
+        if width == 0 or rows == 0:
+            out.append({"sheet": nm, "verdict": "empty", "rows": 0, "cols": width,
+                        "why": "No data on this sheet.", "suggest": "Skip."})
+            continue
+
+        guess = detect_layout(grid)
+        # signals
+        has_multirow_header = guess.header_rows >= 2
+        # repeating metric labels across the header => wide cross-tab
+        header_vals = [grid[guess.header_start + guess.header_rows - 1][c]
+                       for c in range(width)
+                       if guess.header_start + guess.header_rows - 1 < len(grid)
+                       and c < len(grid[guess.header_start + guess.header_rows - 1])]
+        header_strs = [str(v).strip().lower() for v in header_vals if not _is_blank(v)]
+        repeats = len(header_strs) - len(set(header_strs))
+        has_repeating_blocks = repeats >= 2
+        has_merges = len(s.merged) > 0
+        leading_blanks = guess.header_start
+        data_rows = rows - guess.header_rows
+
+        if has_multirow_header or has_repeating_blocks or (has_merges and leading_blanks):
+            verdict = "reshapeable"
+            why = []
+            if has_multirow_header:
+                why.append(f"{guess.header_rows}-row header")
+            if has_repeating_blocks:
+                why.append("repeating metric columns (cross-tab)")
+            if has_merges:
+                why.append(f"{len(s.merged)} merged ranges")
+            suggest = (f"Header at row {guess.header_start+1}, data at "
+                       f"row {guess.data_start+1}; unpivot the repeating columns.")
+        elif guess.header_rows == 1 and data_rows >= 3 and not has_repeating_blocks:
+            verdict = "already_granular"
+            why = ["single header row, flat record layout"]
+            suggest = "Likely usable as-is; export without unpivoting."
+        else:
+            verdict = "review"
+            why = ["has data but layout is ambiguous"]
+            suggest = "Open this sheet and confirm the header/data rows."
+
+        out.append({"sheet": nm, "verdict": verdict, "rows": data_rows,
+                    "cols": width, "why": "; ".join(why) if isinstance(why, list) else why,
+                    "suggest": suggest,
+                    "header_row": guess.header_start + 1,
+                    "data_row": guess.data_start + 1})
+    return out
