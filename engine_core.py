@@ -196,6 +196,8 @@ def detect_layout(grid: list[list[Any]]) -> LayoutGuess:
             break  # stop at the first numeric (measure) column
     if not id_columns:
         id_columns = [0]
+    # never emit a column index outside the actual width
+    id_columns = [c for c in id_columns if 0 <= c < width] or [0]
 
     # 4) total / subtotal rows (match in any id column)
     total_rows = []
