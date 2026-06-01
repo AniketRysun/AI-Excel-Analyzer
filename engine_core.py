@@ -166,20 +166,32 @@ def detect_layout(grid: list[list[Any]]) -> LayoutGuess:
     width = max((len(r) for r in grid), default=0)
     n = len(grid)
 
-    # 1) header band start: first reasonably "dense" row
-    dense_threshold = max(3, int(0.5 * width))
-    header_start = 0
-    for i, row in enumerate(grid):
-        if _nonempty_count(row) >= dense_threshold:
-            header_start = i
-            break
-
-    # 2) data start: first numeric-looking row at/after header_start
-    data_start = header_start + 1
-    for i in range(header_start, n):
+    # 1) data start: the first row of the main numeric block. Scan for the first
+    #    row that looks numeric AND is followed by another numeric row (avoids
+    #    latching onto a stray number in a title/metadata band).
+    data_start = None
+    for i in range(n):
         if _looks_numeric_row(grid[i]):
-            data_start = i
-            break
+            nxt = _looks_numeric_row(grid[i + 1]) if i + 1 < n else False
+            if nxt or i == n - 1:
+                data_start = i
+                break
+    if data_start is None:
+        # no clear numeric block: fall back to first dense row + 1
+        dense_threshold = max(2, int(0.4 * width))
+        first_dense = next((i for i, r in enumerate(grid)
+                            if _nonempty_count(r) >= dense_threshold), 0)
+        data_start = min(first_dense + 1, n - 1)
+
+    # 2) header band: the contiguous run of non-blank text rows immediately above
+    #    data_start (handles wide multi-row headers and leading blank rows).
+    header_start = data_start
+    k = data_start - 1
+    while k >= 0 and _nonempty_count(grid[k]) > 0 and not _looks_numeric_row(grid[k]):
+        header_start = k
+        k -= 1
+    if header_start == data_start:          # no text header found above data
+        header_start = max(0, data_start - 1)
     header_rows = max(1, data_start - header_start)
 
     # 3) id columns: leading columns whose data cells are mostly non-numeric
@@ -264,6 +276,21 @@ def _flatten_headers(grid, cfg: ReshapeConfig) -> list[str]:
 def reshape(sheet: Sheet, cfg: ReshapeConfig) -> dict:
     grid = apply_merges(sheet)
     width = max((len(r) for r in grid), default=0)
+
+    # --- guard rails: never crash on empty / odd sheets ----------------------
+    if width == 0 or len(grid) == 0:
+        raise ValueError("This sheet is empty — pick another sheet.")
+    # clamp config to the actual grid so a stale guess can't index out of range
+    cfg.header_start = max(0, min(cfg.header_start, len(grid) - 1))
+    cfg.data_start = max(cfg.header_start + 1, min(cfg.data_start, len(grid)))
+    cfg.header_rows = max(1, min(cfg.header_rows, max(1, cfg.data_start - cfg.header_start)))
+    cfg.id_columns = sorted({c for c in cfg.id_columns if 0 <= c < width}) or [0]
+    if cfg.data_start >= len(grid):
+        raise ValueError("No data rows below the header — check 'Data starts at row'.")
+    if not [c for c in range(width) if c not in cfg.id_columns]:
+        raise ValueError("Every column is marked as an identifier — leave at least one "
+                         "measure column unselected so there is something to unpivot.")
+
     names = _flatten_headers(grid, cfg)
 
     log: list[str] = []
