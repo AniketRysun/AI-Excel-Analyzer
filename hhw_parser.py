@@ -23,8 +23,13 @@ import engine_core as E
 MONTHS = {"january", "february", "march", "april", "may", "june", "july",
           "august", "september", "october", "november", "december"}
 TOTAL_RE = re.compile(r"\btotal\b", re.IGNORECASE)
-BANNER_RE = re.compile(r"business assurance|sustainability| - (apac|emea|latam|nam|global)",
-                       re.IGNORECASE)
+REGION_SUFFIX_RE = re.compile(
+    r"-\s*(apac|emea|latam|nam|asia|asia pacific|pacific|europe|latin america|"
+    r"north america|south america|central|middle east|africa|globally|global|"
+    r"oceania|caribbean|cis|me&a)\b", re.IGNORECASE)
+# embedded titles / metadata lines that appear mid-sheet and must be skipped
+META_RE = re.compile(r"headcount & hours worked|annual:|half:|quarter:|"
+                     r"\+ 20% ot|per person", re.IGNORECASE)
 
 
 def looks_like_hhw(sheet: "E.Sheet") -> bool:
@@ -84,6 +89,12 @@ def parse(sheet: "E.Sheet", include_ytd: bool = False) -> dict:
     # Walk data rows: region comes from banner rows; country from column A
     records = []
     region = None
+    # the metric header row's column A often carries the FIRST region banner
+    # (e.g. "Environmental - APAC"); seed region from it so the first block isn't lost.
+    seed = str(grid[metric_row][0]).strip() if (metric_row < len(grid) and len(grid[metric_row])
+                                                 and not E._is_blank(grid[metric_row][0])) else ""
+    if seed and (" - " in seed or "global" in seed.lower()):
+        region = seed
     dropped_total = dropped_repeat = 0
     metric_label_set = {mt.lower() for _, mt in col_map.values()} | {"headcount", "work week", "hrs. worked"}
 
@@ -96,17 +107,40 @@ def parse(sheet: "E.Sheet", include_ytd: bool = False) -> dict:
         if TOTAL_RE.search(label):
             dropped_total += 1
             continue
-        # banner row: label mentions a region/business unit and the rest is non-numeric
+
+        # embedded title / metadata line mid-sheet (E&C stacks several sections)
+        if label and META_RE.search(label):
+            dropped_repeat += 1
+            continue
+
+        # Count numbers anywhere in the row (across ALL columns, not just mapped
+        # metric cols) — a real data row has numeric values; a region banner does not.
+        numeric_anywhere = sum(1 for c in range(len(row))
+                               if c != 0 and E.to_number(row[c]) is not None)
         numeric_in_row = sum(1 for c in col_map if c < len(row) and E.to_number(row[c]) is not None)
-        if label and BANNER_RE.search(label) and numeric_in_row == 0:
+
+        # A region banner: column A holds a "Business Unit - Region" style label
+        # (contains ' - ') and the row has at most one stray number. Real data rows
+        # carry a full row of ~20+ numbers, so this cleanly separates the two.
+        has_dash = " - " in label or label.lower().endswith("globally") or "global" in label.lower()
+        if label and has_dash and numeric_anywhere <= 1:
             region = label
             dropped_repeat += 1
             continue
-        # repeated sub-header row (cells equal metric labels, no numbers)
-        if numeric_in_row == 0:
+        # also catch banners with literally no numbers anywhere (defensive)
+        if label and numeric_anywhere == 0:
+            region = label
             dropped_repeat += 1
             continue
-        if not label:  # data row must have a country name
+
+        # repeated sub-header row with no region label: just drop it.
+        cell_strs = {str(row[c]).strip().lower() for c in col_map
+                     if c < len(row) and not E._is_blank(row[c])}
+        if numeric_anywhere == 0 and cell_strs and cell_strs.issubset(metric_label_set):
+            dropped_repeat += 1
+            continue
+
+        if not label:  # data row must have a country/location name
             continue
 
         # emit one row per month for this country
