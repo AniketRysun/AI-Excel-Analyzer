@@ -18,6 +18,15 @@ from openpyxl.utils import get_column_letter, column_index_from_string
 import engine_core as E
 import formula_trace as T
 import hhw_parser as H
+import gtg_parser as G
+
+import re as _re
+
+
+def _year_from_filename(name: str) -> str | None:
+    """Pull a 4-digit year (2000-2099) from the uploaded filename, if present."""
+    m = _re.search(r"(20\d{2})", name or "")
+    return m.group(1) if m else None
 
 st.set_page_config(page_title="Excel → Power BI Granularizer", layout="wide")
 
@@ -89,7 +98,31 @@ with tab_reshape:
 
     # ---- dedicated path for H&HW cross-tabs (handles the irregular layout) ----
     _handled = False
-    if H.looks_like_hhw(sheet):
+    if G.looks_like_gtg(sheet):
+        _handled = True
+        yr = _year_from_filename(uploaded.name)
+        st.success("Detected a Global Technical Governance sheet — using the dedicated "
+                   "parser (granular Location rows, skipping the aggregated tables).")
+        c_yr1, c_yr2 = st.columns([1, 3])
+        yr_in = c_yr1.text_input("Year (from filename; edit if needed)", yr or "")
+        try:
+            gres = G.parse(sheet, year=yr_in or None)
+            gdf = gres["tidy"]
+            st.subheader(f"Granular table — {len(gdf)} rows")
+            st.dataframe(gdf, use_container_width=True, height=420)
+            with st.expander("Transformation log"):
+                for line in gres["log"]:
+                    st.write("•", line)
+            d1, d2 = st.columns(2)
+            d1.download_button("Download CSV", E.to_csv_bytes(gdf),
+                               file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+            d2.download_button("Download XLSX (data + log)",
+                               E.to_xlsx_bytes(gdf, gres["log"]),
+                               file_name=f"{sheet_name}_granular.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"GTG parse failed: {exc}")
+    elif H.looks_like_hhw(sheet):
         _handled = True
         st.success("Detected an H&HW (Headcount & Hours Worked) cross-tab — "
                    "using the dedicated parser.")
