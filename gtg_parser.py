@@ -125,17 +125,19 @@ def parse(sheet: "E.Sheet", year: str | None = None) -> dict:
                 region = label
             dropped_banner += 1
             continue
+        # Some banner rows carry the header labels (col B = 'HSSE' etc.) but don't
+        # match the full header signature (e.g. "Food & Agriculture - Global").
+        # Detect these by the col-B header label, NOT by 'no numbers + dash'
+        # (which wrongly ate zero-value locations like "France - Rouen").
+        second = str(row[1]).strip().lower() if (len(row) > 1 and not E._is_blank(row[1])) else ""
+        if second in {"hsse", "code of conduct"} and label:
+            region = label
+            dropped_banner += 1
+            continue
         if TOTAL_RE.search(label):
             dropped_total += 1
             continue
         if not label or colmap is None:
-            continue
-        # a banner-only row (region change without a repeated header) — rare, but
-        # if the row has a label and no numbers, treat as a region update
-        numeric = sum(1 for c in range(1, len(row)) if E.to_number(row[c]) is not None)
-        if numeric == 0 and " - " in label:
-            region = label
-            dropped_banner += 1
             continue
 
         def gv(c):
