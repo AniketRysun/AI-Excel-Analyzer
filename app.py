@@ -19,6 +19,8 @@ import engine_core as E
 import formula_trace as T
 import hhw_parser as H
 import gtg_parser as G
+import gtg_parser_2025 as G25
+import bu_parser as BU
 
 import re as _re
 
@@ -98,7 +100,53 @@ with tab_reshape:
 
     # ---- dedicated path for H&HW cross-tabs (handles the irregular layout) ----
     _handled = False
-    if G.looks_like_gtg(sheet):
+    if BU.has_bu_table(sheet):
+        _handled = True
+        yr = _year_from_filename(uploaded.name)
+        st.success("Detected the Global Business Units table — transposing into "
+                   "one row per business-unit/region.")
+        yr_in = st.text_input("Year (from filename; edit if needed)", yr or "", key="bu_year")
+        try:
+            bres = BU.parse(sheet, year=yr_in or None)
+            bdf = bres["tidy"]
+            st.subheader(f"Granular table — {len(bdf)} rows")
+            st.dataframe(bdf, use_container_width=True, height=420)
+            with st.expander("Transformation log"):
+                for line in bres["log"]:
+                    st.write("•", line)
+            d1, d2 = st.columns(2)
+            d1.download_button("Download CSV", E.to_csv_bytes(bdf),
+                               file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+            d2.download_button("Download XLSX (data + log)",
+                               E.to_xlsx_bytes(bdf, bres["log"]),
+                               file_name=f"{sheet_name}_granular.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Business Units parse failed: {exc}")
+    elif G25.looks_like_gtg_2025(sheet):
+        _handled = True
+        yr = _year_from_filename(uploaded.name)
+        st.success("Detected a 2025-style GTG sheet (per-business-unit layout) — "
+                   "using the dedicated parser.")
+        yr_in = st.text_input("Year (from filename; edit if needed)", yr or "", key="gtg25_year")
+        try:
+            gres = G25.parse(sheet, year=yr_in or None)
+            gdf = gres["tidy"]
+            st.subheader(f"Granular table — {len(gdf)} rows")
+            st.dataframe(gdf, use_container_width=True, height=420)
+            with st.expander("Transformation log"):
+                for line in gres["log"]:
+                    st.write("•", line)
+            d1, d2 = st.columns(2)
+            d1.download_button("Download CSV", E.to_csv_bytes(gdf),
+                               file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+            d2.download_button("Download XLSX (data + log)",
+                               E.to_xlsx_bytes(gdf, gres["log"]),
+                               file_name=f"{sheet_name}_granular.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"2025 GTG parse failed: {exc}")
+    elif G.looks_like_gtg(sheet):
         _handled = True
         yr = _year_from_filename(uploaded.name)
         st.success("Detected a Global Technical Governance sheet — using the dedicated "
