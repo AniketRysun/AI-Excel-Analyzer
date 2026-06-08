@@ -22,6 +22,7 @@ import gtg_parser as G
 import gtg_parser_2025 as G25
 import bu_parser as BU
 import eventlog_parser as EL
+import kpi_parser as K
 
 import re as _re
 
@@ -124,6 +125,29 @@ with tab_reshape:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as exc:  # noqa: BLE001
             st.error(f"Business Units parse failed: {exc}")
+    elif K.looks_like_kpi(sheet):
+        _handled = True
+        st.success("Detected the Global KPI Workbook — extracting all regional "
+                   "sections into one row per Region × Month × Metric.")
+        drop_calc = st.checkbox("Drop calculated rate/ratio columns (TRIR, LTIR, EMR, "
+                                "DART, Severity) — build them in Power BI", value=True)
+        try:
+            kres = K.parse(sheet, drop_calculated=drop_calc)
+            kdf = kres["tidy"]
+            st.subheader(f"Granular table — {len(kdf)} rows")
+            st.dataframe(kdf, use_container_width=True, height=420)
+            with st.expander("Transformation log"):
+                for line in kres["log"]:
+                    st.write("•", line)
+            d1, d2 = st.columns(2)
+            d1.download_button("Download CSV", E.to_csv_bytes(kdf),
+                               file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+            d2.download_button("Download XLSX (data + log)",
+                               E.to_xlsx_bytes(kdf, kres["log"]),
+                               file_name=f"{sheet_name}_granular.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"KPI Workbook parse failed: {exc}")
     elif EL.looks_like_eventlog(sheet):
         _handled = True
         yr = _year_from_filename(uploaded.name)
