@@ -21,6 +21,7 @@ import hhw_parser as H
 import gtg_parser as G
 import gtg_parser_2025 as G25
 import bu_parser as BU
+import eventlog_parser as EL
 
 import re as _re
 
@@ -123,6 +124,29 @@ with tab_reshape:
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         except Exception as exc:  # noqa: BLE001
             st.error(f"Business Units parse failed: {exc}")
+    elif EL.looks_like_eventlog(sheet):
+        _handled = True
+        yr = _year_from_filename(uploaded.name)
+        st.success("Detected an Event / Incident Log — already granular. Keeping every "
+                   "column (including any new ones) and adding Year.")
+        yr_in = st.text_input("Year (from filename; edit if needed)", yr or "", key="el_year")
+        try:
+            eres = EL.parse(sheet, year=yr_in or None)
+            edf = eres["tidy"]
+            st.subheader(f"Granular table — {len(edf)} rows, {len(edf.columns)} columns")
+            st.dataframe(edf, use_container_width=True, height=420)
+            with st.expander("Transformation log"):
+                for line in eres["log"]:
+                    st.write("•", line)
+            d1, d2 = st.columns(2)
+            d1.download_button("Download CSV", E.to_csv_bytes(edf),
+                               file_name=f"{sheet_name}_granular.csv", mime="text/csv")
+            d2.download_button("Download XLSX (data + log)",
+                               E.to_xlsx_bytes(edf, eres["log"]),
+                               file_name=f"{sheet_name}_granular.xlsx",
+                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Event Log parse failed: {exc}")
     elif G25.looks_like_gtg_2025(sheet):
         _handled = True
         yr = _year_from_filename(uploaded.name)
@@ -195,6 +219,32 @@ with tab_reshape:
             st.error(f"H&HW parse failed: {exc}")
 
     if not _handled:
+        flat_mode = st.checkbox(
+            "This sheet is already a flat table (one row per record) — just keep all "
+            "columns and add Year, don't unpivot", value=False, key="flat_mode")
+        if flat_mode:
+            yr = _year_from_filename(uploaded.name)
+            yr_in = st.text_input("Year (from filename; edit if needed)", yr or "", key="flat_year")
+            try:
+                fres = EL.parse_flat(sheet, year=yr_in or None)
+                fdf = fres["tidy"]
+                st.subheader(f"Flat table — {len(fdf)} rows, {len(fdf.columns)} columns")
+                st.dataframe(fdf, use_container_width=True, height=420)
+                with st.expander("Transformation log"):
+                    for line in fres["log"]:
+                        st.write("•", line)
+                d1, d2 = st.columns(2)
+                d1.download_button("Download CSV", E.to_csv_bytes(fdf),
+                                   file_name=f"{sheet_name}_flat.csv", mime="text/csv")
+                d2.download_button("Download XLSX (data + log)",
+                                   E.to_xlsx_bytes(fdf, fres["log"]),
+                                   file_name=f"{sheet_name}_flat.xlsx",
+                                   mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                st.stop()
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Flat-table parse failed: {exc}")
+                st.stop()
+
         guess = E.detect_layout(grid)
         st.markdown("**Detected layout** (adjust anything that looks wrong):")
 
